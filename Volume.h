@@ -41,7 +41,8 @@ public:
     static const char *SECDIR;
     static const char *SEC_STGDIR;
     static const char *SEC_STG_SECIMGDIR;
-    static const char *SEC_ASECDIR;
+    static const char *SEC_ASECDIR_EXT;
+    static const char *SEC_ASECDIR_INT;
     static const char *ASECDIR;
 
     static const char *LOOPDIR;
@@ -52,6 +53,8 @@ protected:
     VolumeManager *mVm;
     bool mDebug;
     int mPartIdx;
+    int mOrigPartIdx;
+    bool mRetryMount;
 
     /*
      * The major/minor tuple of the currently mounted filesystem.
@@ -63,7 +66,7 @@ public:
     virtual ~Volume();
 
     int mountVol();
-    int unmountVol(bool force);
+    int unmountVol(bool force, bool revert);
     int formatVol();
 
     const char *getLabel() { return mLabel; }
@@ -77,11 +80,16 @@ public:
     virtual void handleVolumeUnshared();
 
     void setDebug(bool enable);
+    virtual int getVolInfo(struct volume_info *v) = 0;
 
 protected:
     void setState(int state);
 
     virtual int getDeviceNodes(dev_t *devs, int max) = 0;
+    virtual int updateDeviceInfo(char *new_path, int new_major, int new_minor) = 0;
+    virtual void revertDeviceInfo(void) = 0;
+    virtual int isDecrypted(void) = 0;
+    virtual int getFlags(void) = 0;
 
     int createDeviceNode(const char *path, int major, int minor);
 

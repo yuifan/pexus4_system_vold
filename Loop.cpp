@@ -15,13 +15,16 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
 
+#include <sys/mount.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 
 #include <linux/kdev_t.h>
 
@@ -31,6 +34,7 @@
 
 #include <sysutils/SocketClient.h>
 #include "Loop.h"
+#include "Asec.h"
 
 int Loop::dumpState(SocketClient *c) {
     int i;
@@ -126,7 +130,7 @@ int Loop::create(const char *id, const char *loopFile, char *loopDeviceBuffer, s
     char filename[256];
 
     for (i = 0; i < LOOP_MAX; i++) {
-        struct loop_info li;
+        struct loop_info64 li;
         int rc;
 
         sprintf(filename, "/dev/block/loop%d", i);
@@ -149,7 +153,7 @@ int Loop::create(const char *id, const char *loopFile, char *loopDeviceBuffer, s
             return -1;
         }
 
-        rc = ioctl(fd, LOOP_GET_STATUS, &li);
+        rc = ioctl(fd, LOOP_GET_STATUS64, &li);
         if (rc < 0 && errno == ENXIO)
             break;
 
@@ -188,8 +192,8 @@ int Loop::create(const char *id, const char *loopFile, char *loopDeviceBuffer, s
     struct loop_info64 li;
 
     memset(&li, 0, sizeof(li));
-    strncpy((char*) li.lo_crypt_name, id, LO_NAME_SIZE);
-    strncpy((char*) li.lo_file_name, loopFile, LO_NAME_SIZE);
+    strlcpy((char*) li.lo_crypt_name, id, LO_NAME_SIZE);
+    strlcpy((char*) li.lo_file_name, loopFile, LO_NAME_SIZE);
 
     if (ioctl(fd, LOOP_SET_STATUS64, &li) < 0) {
         SLOGE("Error setting loopback status (%s)", strerror(errno));
@@ -242,5 +246,47 @@ int Loop::createImageFile(const char *file, unsigned int numSectors) {
         return -1;
     }
     close(fd);
+    return 0;
+}
+
+int Loop::lookupInfo(const char *loopDevice, struct asec_superblock *sb, unsigned int *nr_sec) {
+    int fd;
+    struct asec_superblock buffer;
+
+    if ((fd = open(loopDevice, O_RDONLY)) < 0) {
+        SLOGE("Failed to open loopdevice (%s)", strerror(errno));
+        destroyByDevice(loopDevice);
+        return -1;
+    }
+
+    if (ioctl(fd, BLKGETSIZE, nr_sec)) {
+        SLOGE("Failed to get loop size (%s)", strerror(errno));
+        destroyByDevice(loopDevice);
+        close(fd);
+        return -1;
+    }
+
+    /*
+     * Try to read superblock.
+     */
+    memset(&buffer, 0, sizeof(struct asec_superblock));
+    if (lseek(fd, ((*nr_sec - 1) * 512), SEEK_SET) < 0) {
+        SLOGE("lseek failed (%s)", strerror(errno));
+        close(fd);
+        destroyByDevice(loopDevice);
+        return -1;
+    }
+    if (read(fd, &buffer, sizeof(struct asec_superblock)) != sizeof(struct asec_superblock)) {
+        SLOGE("superblock read failed (%s)", strerror(errno));
+        close(fd);
+        destroyByDevice(loopDevice);
+        return -1;
+    }
+    close(fd);
+
+    /*
+     * Superblock successfully read. Copy to caller's struct.
+     */
+    memcpy(sb, &buffer, sizeof(struct asec_superblock));
     return 0;
 }

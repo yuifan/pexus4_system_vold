@@ -29,6 +29,7 @@
 #include "DirectVolume.h"
 #include "VolumeManager.h"
 #include "ResponseCode.h"
+#include "cryptfs.h"
 
 // #define PARTITION_DEBUG
 
@@ -59,6 +60,10 @@ DirectVolume::~DirectVolume() {
 int DirectVolume::addPath(const char *path) {
     mPaths->push_back(strdup(path));
     return 0;
+}
+
+void DirectVolume::setFlags(int flags) {
+    mFlags = flags;
 }
 
 dev_t DirectVolume::getDiskDevice() {
@@ -108,6 +113,16 @@ int DirectVolume::handleBlockEvent(NetlinkEvent *evt) {
                 } else {
                     handlePartitionAdded(dp, evt);
                 }
+                /* Send notification iff disk is ready (ie all partitions found) */
+                if (getState() == Volume::State_Idle) {
+                    char msg[255];
+
+                    snprintf(msg, sizeof(msg),
+                             "Volume %s %s disk inserted (%d:%d)", getLabel(),
+                             getMountpoint(), mDiskMajor, mDiskMinor);
+                    mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeDiskInserted,
+                                                         msg, false);
+                }
             } else if (action == NetlinkEvent::NlActionRemove) {
                 if (!strcmp(devtype, "disk")) {
                     handleDiskRemoved(dp, evt);
@@ -143,8 +158,6 @@ void DirectVolume::handleDiskAdded(const char *devpath, NetlinkEvent *evt) {
         mDiskNumParts = 1;
     }
 
-    char msg[255];
-
     int partmask = 0;
     int i;
     for (i = 1; i <= mDiskNumParts; i++) {
@@ -164,11 +177,6 @@ void DirectVolume::handleDiskAdded(const char *devpath, NetlinkEvent *evt) {
 #endif
         setState(Volume::State_Pending);
     }
-
-    snprintf(msg, sizeof(msg), "Volume %s %s disk inserted (%d:%d)",
-             getLabel(), getMountpoint(), mDiskMajor, mDiskMinor);
-    mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeDiskInserted,
-                                             msg, false);
 }
 
 void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) {
@@ -187,8 +195,8 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
     }
 
     if (part_num > MAX_PARTITIONS || part_num < 1) {
-        SLOGW("Invalid 'PARTN' value");
-        part_num = 1;
+        SLOGE("Invalid 'PARTN' value");
+        return;
     }
 
     if (part_num > mDiskNumParts) {
@@ -202,15 +210,23 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
 #ifdef PARTITION_DEBUG
     SLOGD("Dv:partAdd: part_num = %d, minor = %d\n", part_num, minor);
 #endif
-    mPartMinors[part_num -1] = minor;
-
+    if (part_num >= MAX_PARTITIONS) {
+        SLOGE("Dv:partAdd: ignoring part_num = %d (max: %d)\n", part_num, MAX_PARTITIONS-1);
+    } else {
+        mPartMinors[part_num -1] = minor;
+    }
     mPendingPartMap &= ~(1 << part_num);
+
     if (!mPendingPartMap) {
 #ifdef PARTITION_DEBUG
         SLOGD("Dv:partAdd: Got all partitions - ready to rock!");
 #endif
         if (getState() != Volume::State_Formatting) {
             setState(Volume::State_Idle);
+            if (mRetryMount == true) {
+                mRetryMount = false;
+                mountVol();
+            }
         }
     } else {
 #ifdef PARTITION_DEBUG
@@ -262,6 +278,11 @@ void DirectVolume::handleDiskRemoved(const char *devpath, NetlinkEvent *evt) {
     int major = atoi(evt->findParam("MAJOR"));
     int minor = atoi(evt->findParam("MINOR"));
     char msg[255];
+    bool enabled;
+
+    if (mVm->shareEnabled(getLabel(), "ums", &enabled) == 0 && enabled) {
+        mVm->unshareVolume(getLabel(), "ums");
+    }
 
     SLOGD("Volume %s %s disk %d:%d removed\n", getLabel(), getMountpoint(), major, minor);
     snprintf(msg, sizeof(msg), "Volume %s %s disk removed (%d:%d)",
@@ -275,6 +296,7 @@ void DirectVolume::handlePartitionRemoved(const char *devpath, NetlinkEvent *evt
     int major = atoi(evt->findParam("MAJOR"));
     int minor = atoi(evt->findParam("MINOR"));
     char msg[255];
+    int state;
 
     SLOGD("Volume %s %s partition %d:%d removed\n", getLabel(), getMountpoint(), major, minor);
 
@@ -284,7 +306,8 @@ void DirectVolume::handlePartitionRemoved(const char *devpath, NetlinkEvent *evt
      * the removal notification will be sent on the Disk
      * itself
      */
-    if (getState() != Volume::State_Mounted) {
+    state = getState();
+    if (state != Volume::State_Mounted && state != Volume::State_Shared) {
         return;
     }
         
@@ -302,10 +325,23 @@ void DirectVolume::handlePartitionRemoved(const char *devpath, NetlinkEvent *evt
             SLOGE("Failed to cleanup ASEC - unmount will probably fail!");
         }
 
-        if (Volume::unmountVol(true)) {
+        if (Volume::unmountVol(true, false)) {
             SLOGE("Failed to unmount volume on bad removal (%s)", 
                  strerror(errno));
             // XXX: At this point we're screwed for now
+        } else {
+            SLOGD("Crisis averted");
+        }
+    } else if (state == Volume::State_Shared) {
+        /* removed during mass storage */
+        snprintf(msg, sizeof(msg), "Volume %s bad removal (%d:%d)",
+                 getLabel(), major, minor);
+        mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeBadRemoval,
+                                             msg, false);
+
+        if (mVm->unshareVolume(getLabel(), "ums")) {
+            SLOGE("Failed to unshare volume on bad removal (%s)",
+                strerror(errno));
         } else {
             SLOGD("Crisis averted");
         }
@@ -334,4 +370,90 @@ int DirectVolume::getDeviceNodes(dev_t *devs, int max) {
     }
     devs[0] = MKDEV(mDiskMajor, mPartMinors[mPartIdx -1]);
     return 1;
+}
+
+/*
+ * Called from base to update device info,
+ * e.g. When setting up an dm-crypt mapping for the sd card.
+ */
+int DirectVolume::updateDeviceInfo(char *new_path, int new_major, int new_minor)
+{
+    PathCollection::iterator it;
+
+    if (mPartIdx == -1) {
+        SLOGE("Can only change device info on a partition\n");
+        return -1;
+    }
+
+    /*
+     * This is to change the sysfs path associated with a partition, in particular,
+     * for an internal SD card partition that is encrypted.  Thus, the list is
+     * expected to be only 1 entry long.  Check that and bail if not.
+     */
+    if (mPaths->size() != 1) {
+        SLOGE("Cannot change path if there are more than one for a volume\n");
+        return -1;
+    }
+
+    it = mPaths->begin();
+    free(*it); /* Free the string storage */
+    mPaths->erase(it); /* Remove it from the list */
+    addPath(new_path); /* Put the new path on the list */
+
+    /* Save away original info so we can restore it when doing factory reset.
+     * Then, when doing the format, it will format the original device in the
+     * clear, otherwise it just formats the encrypted device which is not
+     * readable when the device boots unencrypted after the reset.
+     */
+    mOrigDiskMajor = mDiskMajor;
+    mOrigDiskMinor = mDiskMinor;
+    mOrigPartIdx = mPartIdx;
+    memcpy(mOrigPartMinors, mPartMinors, sizeof(mPartMinors));
+
+    mDiskMajor = new_major;
+    mDiskMinor = new_minor;
+    /* Ugh, virual block devices don't use minor 0 for whole disk and minor > 0 for
+     * partition number.  They don't have partitions, they are just virtual block
+     * devices, and minor number 0 is the first dm-crypt device.  Luckily the first
+     * dm-crypt device is for the userdata partition, which gets minor number 0, and
+     * it is not managed by vold.  So the next device is minor number one, which we
+     * will call partition one.
+     */
+    mPartIdx = new_minor;
+    mPartMinors[new_minor-1] = new_minor;
+
+    mIsDecrypted = 1;
+
+    return 0;
+}
+
+/*
+ * Called from base to revert device info to the way it was before a
+ * crypto mapping was created for it.
+ */
+void DirectVolume::revertDeviceInfo(void)
+{
+    if (mIsDecrypted) {
+        mDiskMajor = mOrigDiskMajor;
+        mDiskMinor = mOrigDiskMinor;
+        mPartIdx = mOrigPartIdx;
+        memcpy(mPartMinors, mOrigPartMinors, sizeof(mPartMinors));
+
+        mIsDecrypted = 0;
+    }
+
+    return;
+}
+
+/*
+ * Called from base to give cryptfs all the info it needs to encrypt eligible volumes
+ */
+int DirectVolume::getVolInfo(struct volume_info *v)
+{
+    strcpy(v->label, mLabel);
+    strcpy(v->mnt_point, mMountpoint);
+    v->flags=mFlags;
+    /* Other fields of struct volume_info are filled in by the caller or cryptfs.c */
+
+    return 0;
 }

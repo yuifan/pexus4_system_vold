@@ -32,6 +32,7 @@
 #include "CommandListener.h"
 #include "NetlinkManager.h"
 #include "DirectVolume.h"
+#include "cryptfs.h"
 
 static int process_config(VolumeManager *vm);
 static void coldboot(const char *path);
@@ -141,6 +142,22 @@ static void coldboot(const char *path)
     }
 }
 
+static int parse_mount_flags(char *mount_flags)
+{
+    char *save_ptr;
+    int flags = 0;
+
+    if (strcasestr(mount_flags, "encryptable")) {
+        flags |= VOL_ENCRYPTABLE;
+    }
+
+    if (strcasestr(mount_flags, "nonremovable")) {
+        flags |= VOL_NONREMOVABLE;
+    }
+
+    return flags;
+}
+
 static int process_config(VolumeManager *vm) {
     FILE *fp;
     int n = 0;
@@ -151,8 +168,10 @@ static int process_config(VolumeManager *vm) {
     }
 
     while(fgets(line, sizeof(line), fp)) {
-        char *next = line;
-        char *type, *label, *mount_point;
+        const char *delim = " \t";
+        char *save_ptr;
+        char *type, *label, *mount_point, *mount_flags, *sysfs_path;
+        int flags;
 
         n++;
         line[strlen(line)-1] = '\0';
@@ -160,24 +179,24 @@ static int process_config(VolumeManager *vm) {
         if (line[0] == '#' || line[0] == '\0')
             continue;
 
-        if (!(type = strsep(&next, " \t"))) {
+        if (!(type = strtok_r(line, delim, &save_ptr))) {
             SLOGE("Error parsing type");
             goto out_syntax;
         }
-        if (!(label = strsep(&next, " \t"))) {
+        if (!(label = strtok_r(NULL, delim, &save_ptr))) {
             SLOGE("Error parsing label");
             goto out_syntax;
         }
-        if (!(mount_point = strsep(&next, " \t"))) {
+        if (!(mount_point = strtok_r(NULL, delim, &save_ptr))) {
             SLOGE("Error parsing mount point");
             goto out_syntax;
         }
 
         if (!strcmp(type, "dev_mount")) {
             DirectVolume *dv = NULL;
-            char *part, *sysfs_path;
+            char *part;
 
-            if (!(part = strsep(&next, " \t"))) {
+            if (!(part = strtok_r(NULL, delim, &save_ptr))) {
                 SLOGE("Error parsing partition");
                 goto out_syntax;
             }
@@ -192,13 +211,27 @@ static int process_config(VolumeManager *vm) {
                 dv = new DirectVolume(vm, label, mount_point, atoi(part));
             }
 
-            while((sysfs_path = strsep(&next, " \t"))) {
+            while ((sysfs_path = strtok_r(NULL, delim, &save_ptr))) {
+                if (*sysfs_path != '/') {
+                    /* If the first character is not a '/', it must be flags */
+                    break;
+                }
                 if (dv->addPath(sysfs_path)) {
                     SLOGE("Failed to add devpath %s to volume %s", sysfs_path,
                          label);
                     goto out_fail;
                 }
             }
+
+            /* If sysfs_path is non-null at this point, then it contains
+             * the optional flags for this volume
+             */
+            if (sysfs_path)
+                flags = parse_mount_flags(sysfs_path);
+            else
+                flags = 0;
+            dv->setFlags(flags);
+
             vm->addVolume(dv);
         } else if (!strcmp(type, "map_mount")) {
         } else {

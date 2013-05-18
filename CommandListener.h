@@ -42,18 +42,13 @@ private:
         int runCommand(SocketClient *c, int argc, char ** argv);
     };
 
-    class ShareCmd : public VoldCommand {
-    public:
-        ShareCmd();
-        virtual ~ShareCmd() {}
-        int runCommand(SocketClient *c, int argc, char ** argv);
-    };
-
     class AsecCmd : public VoldCommand {
     public:
         AsecCmd();
         virtual ~AsecCmd() {}
         int runCommand(SocketClient *c, int argc, char ** argv);
+    private:
+        void listAsecsInDirectory(SocketClient *c, const char *directory);
     };
 
     class ObbCmd : public VoldCommand {
@@ -74,6 +69,13 @@ private:
     public:
         XwarpCmd();
         virtual ~XwarpCmd() {}
+        int runCommand(SocketClient *c, int argc, char ** argv);
+    };
+
+    class CryptfsCmd : public VoldCommand {
+    public:
+        CryptfsCmd();
+        virtual ~CryptfsCmd() {}
         int runCommand(SocketClient *c, int argc, char ** argv);
     };
 };

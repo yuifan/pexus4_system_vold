@@ -1,10 +1,3 @@
-BUILD_VOLD2 := false
-ifneq ($(TARGET_SIMULATOR),true)
-    BUILD_VOLD2 := true
-endif
-
-ifeq ($(BUILD_VOLD2),true)
-
 LOCAL_PATH:= $(call my-dir)
 
 common_src_files := \
@@ -17,20 +10,24 @@ common_src_files := \
 	DirectVolume.cpp \
 	logwrapper.c \
 	Process.cpp \
+	Ext4.cpp \
 	Fat.cpp \
 	Loop.cpp \
 	Devmapper.cpp \
 	ResponseCode.cpp \
-	Xwarp.cpp
+	Xwarp.cpp \
+	cryptfs.c
 
 common_c_includes := \
 	$(KERNEL_HEADERS) \
+	system/extras/ext4_utils \
 	external/openssl/include
 
 common_shared_libraries := \
 	libsysutils \
 	libcutils \
 	libdiskconfig \
+	libhardware_legacy \
 	libcrypto
 
 include $(CLEAR_VARS)
@@ -42,6 +39,8 @@ LOCAL_SRC_FILES := $(common_src_files)
 LOCAL_C_INCLUDES := $(common_c_includes)
 
 LOCAL_SHARED_LIBRARIES := $(common_shared_libraries)
+
+LOCAL_STATIC_LIBRARIES := libfs_mgr
 
 LOCAL_MODULE_TAGS := eng tests
 
@@ -57,9 +56,11 @@ LOCAL_SRC_FILES := \
 
 LOCAL_C_INCLUDES := $(common_c_includes)
 
-LOCAL_CFLAGS := 
+LOCAL_CFLAGS := -Werror=format
 
 LOCAL_SHARED_LIBRARIES := $(common_shared_libraries)
+
+LOCAL_STATIC_LIBRARIES := libfs_mgr
 
 include $(BUILD_EXECUTABLE)
 
@@ -76,5 +77,3 @@ LOCAL_CFLAGS :=
 LOCAL_SHARED_LIBRARIES := libcutils
 
 include $(BUILD_EXECUTABLE)
-
-endif # ifeq ($(BUILD_VOLD,true)

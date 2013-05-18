@@ -27,14 +27,19 @@ typedef android::List<char *> PathCollection;
 
 class DirectVolume : public Volume {
 public:
-    static const int MAX_PARTITIONS = 4;
+    static const int MAX_PARTITIONS = 32;
 protected:
     PathCollection *mPaths;
     int            mDiskMajor;
     int            mDiskMinor;
     int            mPartMinors[MAX_PARTITIONS];
+    int            mOrigDiskMajor;
+    int            mOrigDiskMinor;
+    int            mOrigPartMinors[MAX_PARTITIONS];
     int            mDiskNumParts;
-    unsigned char  mPendingPartMap;
+    unsigned int   mPendingPartMap;
+    int            mIsDecrypted;
+    int            mFlags;
 
 public:
     DirectVolume(VolumeManager *vm, const char *label, const char *mount_point, int partIdx);
@@ -47,9 +52,15 @@ public:
     dev_t getShareDevice();
     void handleVolumeShared();
     void handleVolumeUnshared();
+    int getVolInfo(struct volume_info *v);
+    void setFlags(int flags);
 
 protected:
     int getDeviceNodes(dev_t *devs, int max);
+    int updateDeviceInfo(char *new_path, int new_major, int new_minor);
+    virtual void revertDeviceInfo(void);
+    int isDecrypted() { return mIsDecrypted; }
+    int getFlags() { return mFlags; }
 
 private:
     void handleDiskAdded(const char *devpath, NetlinkEvent *evt);
